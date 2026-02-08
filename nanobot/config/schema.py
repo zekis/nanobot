@@ -112,6 +112,13 @@ class ToolsConfig(BaseModel):
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 
+class HooksConfig(BaseModel):
+    """Webhook hooks configuration for event capture."""
+    webhook_url: str = ""  # URL to POST events to (e.g. Frappe events endpoint)
+    webhook_auth: str = ""  # Authorization header value (e.g. "token api_key:api_secret")
+    nanobot_token: str = ""  # Nanobot identity token for Layer 2 auth
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
@@ -119,6 +126,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
     
     @property
     def workspace_path(self) -> Path:

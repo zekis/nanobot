@@ -198,7 +198,18 @@ def gateway(
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
-    
+
+    # Create webhook emitter if configured
+    webhook_emitter = None
+    if config.hooks.webhook_url:
+        from nanobot.hooks.webhook import WebhookEmitter
+        webhook_emitter = WebhookEmitter(
+            url=config.hooks.webhook_url,
+            auth=config.hooks.webhook_auth,
+            nanobot_token=config.hooks.nanobot_token,
+        )
+        console.print(f"[green]✓[/green] Webhook events: {config.hooks.webhook_url}")
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
@@ -211,6 +222,7 @@ def gateway(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
+        webhook_emitter=webhook_emitter,
     )
     
     # Set cron callback (needs agent)

@@ -46,6 +46,7 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
+        webhook_emitter: "WebhookEmitter | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -58,6 +59,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.webhook_emitter = webhook_emitter
         
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -158,7 +160,12 @@ class AgentLoop:
         
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
-        
+
+        # Emit user_message event
+        await self._emit_event("user_message",
+            session_key=msg.session_key, channel=msg.channel,
+            role="user", content=msg.content)
+
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
         
@@ -221,13 +228,36 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+
+                    # Emit tool_call event
+                    await self._emit_event("tool_call",
+                        session_key=msg.session_key, channel=msg.channel,
+                        role="tool", tool_name=tool_call.name,
+                        tool_arguments=args_str, model=self.model)
+
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+
+                    # Emit tool_result event
+                    await self._emit_event("tool_result",
+                        session_key=msg.session_key, channel=msg.channel,
+                        role="tool", tool_name=tool_call.name,
+                        content=result[:5000] if result else "")
             else:
                 # No tool calls, we're done
                 final_content = response.content
+
+                # Emit assistant_message event with token usage
+                usage = response.usage or {}
+                await self._emit_event("assistant_message",
+                    session_key=msg.session_key, channel=msg.channel,
+                    role="assistant", content=final_content,
+                    model=self.model,
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    total_tokens=usage.get("total_tokens", 0))
                 break
         
         if final_content is None:
@@ -248,6 +278,21 @@ class AgentLoop:
             content=final_content
         )
     
+    async def _emit_event(self, event_type: str, **kwargs) -> None:
+        """Emit a webhook event if a webhook emitter is configured.
+
+        Fire-and-forget — never blocks the agent loop or raises exceptions.
+
+        Args:
+            event_type: One of user_message, assistant_message, tool_call, tool_result.
+            **kwargs: Additional event fields.
+        """
+        if self.webhook_emitter:
+            try:
+                await self.webhook_emitter.emit(event_type, **kwargs)
+            except Exception as e:
+                logger.debug(f"Webhook emit failed: {e}")
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
