@@ -325,7 +325,10 @@ class AgentLoop:
         # Skip trivial messages
         stripped = query.strip()
         if len(stripped) < 5:
+            logger.debug(f"Memory retrieval skipped: query too short ({len(stripped)} chars)")
             return ""
+
+        logger.info(f"Memory retrieval: querying with '{stripped[:60]}...'")
 
         try:
             import httpx
@@ -348,7 +351,7 @@ class AgentLoop:
                 )
 
             if resp.status_code != 200:
-                logger.warning(f"Memory retrieval returned {resp.status_code}")
+                logger.warning(f"Memory retrieval returned {resp.status_code}: {resp.text[:200]}")
                 return ""
 
             data = resp.json()
@@ -359,11 +362,13 @@ class AgentLoop:
             memories = data.get("memories", "")
             count = data.get("count", 0)
             if memories and count > 0:
-                logger.info(f"Retrieved {count} memories for context injection")
+                logger.info(f"Memory retrieval: injecting {count} memories into context")
+            else:
+                logger.info("Memory retrieval: no relevant memories found")
             return memories
 
         except Exception as e:
-            logger.debug(f"Memory retrieval failed: {e}")
+            logger.warning(f"Memory retrieval failed: {e}")
             return ""
 
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
