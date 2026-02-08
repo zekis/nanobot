@@ -119,6 +119,15 @@ class HooksConfig(BaseModel):
     nanobot_token: str = ""  # Nanobot identity token for Layer 2 auth
 
 
+class MemoryConfig(BaseModel):
+    """Memory retrieval configuration for automatic context injection."""
+    enabled: bool = False  # Master switch for auto-retrieval
+    retrieval_url: str = ""  # URL to POST retrieval queries to (e.g. Frappe memory.retrieve endpoint)
+    retrieval_auth: str = ""  # Authorization header value (e.g. "token api_key:api_secret")
+    nanobot_token: str = ""  # Nanobot identity token
+    top_k: int = 5  # Number of memories to retrieve per query
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
@@ -127,6 +136,7 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     
     @property
     def workspace_path(self) -> Path:

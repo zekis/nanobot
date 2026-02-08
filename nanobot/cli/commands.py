@@ -223,7 +223,10 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         webhook_emitter=webhook_emitter,
+        memory_config=config.memory if config.memory.enabled else None,
     )
+    if config.memory.enabled:
+        console.print(f"[green]✓[/green] Memory retrieval: {config.memory.retrieval_url}")
     
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:

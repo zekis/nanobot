@@ -47,8 +47,9 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         webhook_emitter: "WebhookEmitter | None" = None,
+        memory_config: "MemoryConfig | None" = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
+        from nanobot.config.schema import ExecToolConfig, MemoryConfig
         from nanobot.cron.service import CronService
         self.bus = bus
         self.provider = provider
@@ -60,6 +61,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.webhook_emitter = webhook_emitter
+        self.memory_config = memory_config
         
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -168,20 +170,27 @@ class AgentLoop:
 
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
-        
+
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(msg.channel, msg.chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
-        
+
+        # Retrieve relevant memories if enabled
+        retrieved_memories = await self._retrieve_memories(msg.content)
+        if retrieved_memories:
+            await self._emit_event("memory_retrieval",
+                session_key=msg.session_key, channel=msg.channel,
+                role="system", content=retrieved_memories)
+
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -189,6 +198,7 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
+            retrieved_memories=retrieved_memories,
         )
         
         # Agent loop
@@ -292,6 +302,69 @@ class AgentLoop:
                 await self.webhook_emitter.emit(event_type, **kwargs)
             except Exception as e:
                 logger.debug(f"Webhook emit failed: {e}")
+
+    async def _retrieve_memories(self, query: str) -> str:
+        """Retrieve relevant memories from the Frappe memory API.
+
+        Called before each LLM call to inject relevant memories into context.
+        Returns an empty string if memory retrieval is disabled, the query is
+        too short, or the API call fails.
+
+        Args:
+            query: The user's message text to search against.
+
+        Returns:
+            Formatted memories markdown string, or empty string.
+        """
+        if not self.memory_config or not self.memory_config.enabled:
+            return ""
+
+        if not self.memory_config.retrieval_url:
+            return ""
+
+        # Skip trivial messages
+        stripped = query.strip()
+        if len(stripped) < 5:
+            return ""
+
+        try:
+            import httpx
+
+            headers = {"Content-Type": "application/json"}
+            if self.memory_config.retrieval_auth:
+                headers["Authorization"] = self.memory_config.retrieval_auth
+
+            payload = {
+                "query": stripped,
+                "nanobot_token": self.memory_config.nanobot_token,
+                "top_k": self.memory_config.top_k,
+            }
+
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                resp = await client.post(
+                    self.memory_config.retrieval_url,
+                    json=payload,
+                    headers=headers,
+                )
+
+            if resp.status_code != 200:
+                logger.warning(f"Memory retrieval returned {resp.status_code}")
+                return ""
+
+            data = resp.json()
+            # Frappe wraps responses in {"message": ...}
+            if "message" in data:
+                data = data["message"]
+
+            memories = data.get("memories", "")
+            count = data.get("count", 0)
+            if memories and count > 0:
+                logger.info(f"Retrieved {count} memories for context injection")
+            return memories
+
+        except Exception as e:
+            logger.debug(f"Memory retrieval failed: {e}")
+            return ""
 
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
