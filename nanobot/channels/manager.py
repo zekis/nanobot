@@ -84,6 +84,16 @@ class ChannelManager:
                 logger.info("Feishu channel enabled")
             except ImportError as e:
                 logger.warning(f"Feishu channel not available: {e}")
+
+        # API channel (always enabled - uses gateway config for host/port)
+        try:
+            from nanobot.channels.api import ApiChannel
+            self.channels["api"] = ApiChannel(
+                self.config.gateway, self.bus
+            )
+            logger.info("API channel enabled")
+        except ImportError as e:
+            logger.warning(f"API channel not available: {e}")
     
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""
