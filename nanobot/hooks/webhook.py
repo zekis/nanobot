@@ -56,7 +56,7 @@ class WebhookEmitter:
         payload = {
             "event_type": event_type,
             "nanobot_token": self.nanobot_token,
-            "event_timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             **kwargs,
         }
 
