@@ -207,23 +207,30 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         self,
         messages: list[dict[str, Any]],
         content: str | None,
-        tool_calls: list[dict[str, Any]] | None = None
+        tool_calls: list[dict[str, Any]] | None = None,
+        reasoning_content: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Add an assistant message to the message list.
-        
+
         Args:
             messages: Current message list.
             content: Message content.
             tool_calls: Optional tool calls.
-        
+            reasoning_content: Optional reasoning content from reasoning models.
+
         Returns:
             Updated message list.
         """
         msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
-        
+
         if tool_calls:
             msg["tool_calls"] = tool_calls
-        
+
+        # Include reasoning_content for reasoning models (e.g. Moonshot kimi-k2.5)
+        # The API requires this field to be echoed back in conversation history
+        if reasoning_content:
+            msg["reasoning_content"] = reasoning_content
+
         messages.append(msg)
         return messages

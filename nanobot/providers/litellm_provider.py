@@ -68,7 +68,7 @@ class LiteLLMProvider(LLMProvider):
                 os.environ.setdefault("GROQ_API_KEY", api_key)
             elif "moonshot" in default_model or "kimi" in default_model:
                 os.environ.setdefault("MOONSHOT_API_KEY", api_key)
-                os.environ.setdefault("MOONSHOT_API_BASE", api_base or "https://api.moonshot.cn/v1")
+                os.environ.setdefault("MOONSHOT_API_BASE", api_base or "https://api.moonshot.ai/v1")
         
         if api_base:
             litellm.api_base = api_base
@@ -125,6 +125,7 @@ class LiteLLMProvider(LLMProvider):
         # kimi-k2.5 only supports temperature=1.0
         if "kimi-k2.5" in model.lower():
             temperature = 1.0
+            
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -132,7 +133,11 @@ class LiteLLMProvider(LLMProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        
+
+        # Moonshot doesn't support thinking parameter - drop unsupported params
+        if model.lower().startswith("moonshot/"):
+            kwargs["drop_params"] = True
+
         # Pass api_base directly for custom endpoints (vLLM, etc.)
         if self.api_base:
             kwargs["api_base"] = self.api_base
@@ -185,12 +190,16 @@ class LiteLLMProvider(LLMProvider):
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
             }
-        
+
+        # Extract reasoning_content for reasoning models (e.g. Moonshot kimi-k2.5)
+        reasoning_content = getattr(message, "reasoning_content", None)
+
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
+            reasoning_content=reasoning_content,
         )
     
     def get_default_model(self) -> str:
