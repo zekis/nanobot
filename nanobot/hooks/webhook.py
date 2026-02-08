@@ -36,7 +36,7 @@ class WebhookEmitter:
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create the HTTP client."""
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=10.0)
+            self._client = httpx.AsyncClient(timeout=10.0, follow_redirects=True)
         return self._client
 
     async def emit(self, event_type: str, **kwargs) -> None:
@@ -80,7 +80,7 @@ class WebhookEmitter:
                 headers["Authorization"] = self.auth
             client = self._get_client()
             resp = await client.post(self.url, json=payload, headers=headers)
-            if resp.status_code >= 400:
+            if resp.status_code >= 300:
                 logger.warning(f"Webhook POST {event_type} returned {resp.status_code}: {resp.text[:200]}")
             else:
                 logger.debug(f"Webhook event {event_type} sent OK ({resp.status_code})")
