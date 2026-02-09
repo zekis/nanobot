@@ -273,6 +273,28 @@ def gateway(
     
     console.print(f"[green]✓[/green] Heartbeat: every 30m")
     
+    async def check_redeployment_notice():
+        """Check for REDEPLOYMENT_NOTICE.md on startup and prompt the agent."""
+        notice_path = config.workspace_path / "REDEPLOYMENT_NOTICE.md"
+        if not notice_path.exists():
+            return
+        # Wait for channels (e.g. Telegram) to connect before prompting
+        await asyncio.sleep(10)
+        try:
+            notice = notice_path.read_text(encoding="utf-8").strip()
+            if notice:
+                console.print("[green]✓[/green] Redeployment notice found, prompting agent...")
+                await agent.process_direct(
+                    notice,
+                    session_key="system:redeployment",
+                    channel="system",
+                    chat_id="direct",
+                )
+            # Remove after processing so it doesn't re-trigger on normal restarts
+            notice_path.unlink(missing_ok=True)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to process redeployment notice: {e}[/yellow]")
+
     async def run():
         try:
             await cron.start()
@@ -280,6 +302,7 @@ def gateway(
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
+                check_redeployment_notice(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
