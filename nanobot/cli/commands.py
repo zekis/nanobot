@@ -282,14 +282,42 @@ def gateway(
         await asyncio.sleep(10)
         try:
             notice = notice_path.read_text(encoding="utf-8").strip()
-            if notice:
-                console.print("[green]✓[/green] Redeployment notice found, prompting agent...")
-                await agent.process_direct(
-                    notice,
-                    session_key="system:redeployment",
-                    channel="system",
-                    chat_id="direct",
-                )
+            if not notice:
+                notice_path.unlink(missing_ok=True)
+                return
+
+            console.print("[green]✓[/green] Redeployment notice found, prompting agent...")
+
+            # Determine where to deliver the response.
+            # Prefer Telegram if configured, otherwise process silently.
+            deliver_channel = None
+            deliver_chat_id = None
+            if config.channels.telegram.enabled and config.channels.telegram.allow_from:
+                deliver_channel = "telegram"
+                deliver_chat_id = str(config.channels.telegram.allow_from[0])
+
+            # Use the delivery channel so the agent's tool context (message,
+            # spawn, cron) is set to the correct destination.
+            ch = deliver_channel or "cli"
+            cid = deliver_chat_id or "direct"
+
+            response = await agent.process_direct(
+                notice,
+                session_key=f"{ch}:{cid}",
+                channel=ch,
+                chat_id=cid,
+            )
+
+            # Publish the response to the channel (process_direct returns
+            # the content string but does not publish via the bus).
+            if deliver_channel and deliver_chat_id and response:
+                from nanobot.bus.events import OutboundMessage
+                await bus.publish_outbound(OutboundMessage(
+                    channel=deliver_channel,
+                    chat_id=deliver_chat_id,
+                    content=response,
+                ))
+
             # Remove after processing so it doesn't re-trigger on normal restarts
             notice_path.unlink(missing_ok=True)
         except Exception as e:
