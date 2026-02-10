@@ -6,7 +6,7 @@ import uuid
 from aiohttp import web
 from loguru import logger
 
-from nanobot.bus.events import OutboundMessage
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import GatewayConfig
@@ -20,12 +20,11 @@ class ApiChannel(BaseChannel):
     Frappe (or any HTTP client) sends POST /chat and gets the agent's
     response back synchronously.
 
-    Flow:
-        POST /chat  →  publish InboundMessage to bus
-                    →  agent processes via AgentLoop
-                    →  outbound dispatched to ApiChannel.send()
-                    →  resolves the pending Future
-                    →  HTTP response returned
+    Endpoints:
+        POST /chat    →  synchronous chat (new session per request)
+        POST /notify  →  inject a message into an existing channel session
+                         (fire-and-forget; agent response goes to the channel)
+        GET  /health  →  health check
     """
 
     name = "api"
@@ -43,6 +42,7 @@ class ApiChannel(BaseChannel):
 
         self._app = web.Application()
         self._app.router.add_post("/chat", self._handle_chat)
+        self._app.router.add_post("/notify", self._handle_notify)
         self._app.router.add_get("/health", self._handle_health)
 
         self._runner = web.AppRunner(self._app)
@@ -149,6 +149,72 @@ class ApiChannel(BaseChannel):
             "response": response_text,
             "session_id": session_id,
         })
+
+    async def _handle_notify(self, request: web.Request) -> web.Response:
+        """
+        Handle POST /notify requests — inject a message into an existing
+        channel session.
+
+        Unlike /chat (which creates a new one-off API session), /notify
+        publishes an InboundMessage using the caller-specified channel and
+        chat_id.  This means the agent loads the **same session history**
+        as the target channel (e.g. ``telegram:123456789``), has full
+        conversation context, and the response is automatically routed
+        to that channel by the ChannelManager.
+
+        Fire-and-forget: returns immediately after publishing to the bus.
+        The agent processes asynchronously and the response goes to the
+        target channel (e.g. Telegram), not back in the HTTP response.
+
+        Request JSON:
+            {
+                "message": "Notification text...",
+                "channel": "telegram",
+                "chat_id": "123456789"
+            }
+
+        Response JSON:
+            {"status": "ok"}
+        """
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "Invalid JSON body"}, status=400
+            )
+
+        message = data.get("message", "").strip()
+        if not message:
+            return web.json_response(
+                {"error": "message field is required"}, status=400
+            )
+
+        channel = data.get("channel", "").strip()
+        chat_id = data.get("chat_id", "").strip()
+        if not channel or not chat_id:
+            return web.json_response(
+                {"error": "channel and chat_id fields are required"}, status=400
+            )
+
+        # Publish directly to the bus with the target channel/chat_id.
+        # This bypasses the API channel's own session — the agent will
+        # load the session for f"{channel}:{chat_id}" (e.g. telegram:123456789)
+        # and the response OutboundMessage will be routed to that channel.
+        msg = InboundMessage(
+            channel=channel,
+            sender_id="system",
+            chat_id=chat_id,
+            content=message,
+            metadata={"source": "notify"},
+        )
+        await self.bus.publish_inbound(msg)
+
+        logger.info(
+            f"[notify] Injected message into {channel}:{chat_id} "
+            f"({len(message)} chars)"
+        )
+
+        return web.json_response({"status": "ok"})
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         """Handle GET /health requests."""
