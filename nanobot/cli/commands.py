@@ -323,6 +323,52 @@ def gateway(
         except Exception as e:
             console.print(f"[yellow]Warning: Failed to process redeployment notice: {e}[/yellow]")
 
+    async def check_startup_notice():
+        """Check for STARTUP_NOTICE.md on startup and prompt the agent to greet."""
+        notice_path = config.workspace_path / "STARTUP_NOTICE.md"
+        if not notice_path.exists():
+            return
+        # Wait for channels (e.g. Telegram) to connect before prompting
+        await asyncio.sleep(10)
+        try:
+            notice = notice_path.read_text(encoding="utf-8").strip()
+            if not notice:
+                notice_path.unlink(missing_ok=True)
+                return
+
+            console.print("[green]✓[/green] Startup notice found, sending greeting...")
+
+            # Determine where to deliver the response.
+            # Prefer Telegram if configured, otherwise process silently.
+            deliver_channel = None
+            deliver_chat_id = None
+            if config.channels.telegram.enabled and config.channels.telegram.allow_from:
+                deliver_channel = "telegram"
+                deliver_chat_id = str(config.channels.telegram.allow_from[0])
+
+            ch = deliver_channel or "cli"
+            cid = deliver_chat_id or "direct"
+
+            response = await agent.process_direct(
+                notice,
+                session_key=f"{ch}:{cid}",
+                channel=ch,
+                chat_id=cid,
+            )
+
+            if deliver_channel and deliver_chat_id and response:
+                from nanobot.bus.events import OutboundMessage
+                await bus.publish_outbound(OutboundMessage(
+                    channel=deliver_channel,
+                    chat_id=deliver_chat_id,
+                    content=response,
+                ))
+
+            # Remove after processing so it doesn't re-trigger on normal restarts
+            notice_path.unlink(missing_ok=True)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to process startup notice: {e}[/yellow]")
+
     async def run():
         try:
             await cron.start()
@@ -331,6 +377,7 @@ def gateway(
                 agent.run(),
                 channels.start_all(),
                 check_redeployment_notice(),
+                check_startup_notice(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
