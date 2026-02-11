@@ -128,6 +128,11 @@ class MemoryConfig(BaseModel):
     top_k: int = 5  # Number of memories to retrieve per query
 
 
+class DebugConfig(BaseModel):
+    """Debug configuration for development and troubleshooting."""
+    log_tool_calls: bool = False  # Send tool call details (name, args, result) to the chat channel
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
@@ -137,6 +142,7 @@ class Config(BaseSettings):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    debug: DebugConfig = Field(default_factory=DebugConfig)
     
     @property
     def workspace_path(self) -> Path:

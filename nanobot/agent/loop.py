@@ -48,8 +48,9 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         webhook_emitter: "WebhookEmitter | None" = None,
         memory_config: "MemoryConfig | None" = None,
+        debug_config: "DebugConfig | None" = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, MemoryConfig
+        from nanobot.config.schema import ExecToolConfig, MemoryConfig, DebugConfig
         from nanobot.cron.service import CronService
         self.bus = bus
         self.provider = provider
@@ -62,6 +63,7 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self.webhook_emitter = webhook_emitter
         self.memory_config = memory_config
+        self.debug_config = debug_config or DebugConfig()
         
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -255,6 +257,12 @@ class AgentLoop:
                         session_key=msg.session_key, channel=msg.channel,
                         role="tool", tool_name=tool_call.name,
                         content=result[:5000] if result else "")
+
+                    # Send debug message to channel if enabled
+                    await self._debug_tool_call(
+                        msg.channel, msg.chat_id,
+                        tool_call.name, args_str, result
+                    )
             else:
                 # No tool calls, we're done
                 final_content = response.content
@@ -302,6 +310,46 @@ class AgentLoop:
                 await self.webhook_emitter.emit(event_type, **kwargs)
             except Exception as e:
                 logger.debug(f"Webhook emit failed: {e}")
+
+    async def _debug_tool_call(
+        self, channel: str, chat_id: str,
+        tool_name: str, args_str: str, result: str | None
+    ) -> None:
+        """Send a debug message to the channel with tool call details.
+
+        Only sends if debug.log_tool_calls is enabled. Fire-and-forget —
+        never blocks the agent loop.
+
+        Args:
+            channel: Originating channel name.
+            chat_id: Originating chat ID.
+            tool_name: Name of the tool that was called.
+            args_str: JSON-encoded tool arguments.
+            result: Tool execution result (may be long).
+        """
+        if not self.debug_config.log_tool_calls:
+            return
+
+        # Truncate for readability
+        args_preview = args_str[:300] + ("..." if len(args_str) > 300 else "")
+        result_preview = (result or "")[:500]
+        if result and len(result) > 500:
+            result_preview += "..."
+
+        debug_msg = (
+            f"🔧 **Tool Call:** `{tool_name}`\n"
+            f"**Args:** ```\n{args_preview}\n```\n"
+            f"**Result:** ```\n{result_preview}\n```"
+        )
+
+        try:
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=debug_msg,
+            ))
+        except Exception as e:
+            logger.debug(f"Debug tool call message failed: {e}")
 
     async def _retrieve_memories(self, query: str) -> str:
         """Retrieve relevant memories from the Frappe memory API.
@@ -451,6 +499,12 @@ class AgentLoop:
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
+                    )
+
+                    # Send debug message to origin channel if enabled
+                    await self._debug_tool_call(
+                        origin_channel, origin_chat_id,
+                        tool_call.name, args_str, result
                     )
             else:
                 final_content = response.content

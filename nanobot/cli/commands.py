@@ -224,6 +224,7 @@ def gateway(
         session_manager=session_manager,
         webhook_emitter=webhook_emitter,
         memory_config=config.memory if config.memory.enabled else None,
+        debug_config=config.debug,
     )
     if config.memory.enabled:
         console.print(f"[green]✓[/green] Memory retrieval: {config.memory.retrieval_url}")
