@@ -196,6 +196,9 @@ class TelegramChannel(BaseChannel):
             chat_id = int(msg.chat_id)
             # Convert markdown to Telegram HTML
             html_content = _markdown_to_telegram_html(msg.content)
+            # Wrap debug messages in expandable blockquote so they're collapsed
+            if msg.metadata.get("is_debug"):
+                html_content = f"<blockquote expandable>{html_content}</blockquote>"
             await self._app.bot.send_message(
                 chat_id=chat_id,
                 text=html_content,

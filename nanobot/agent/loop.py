@@ -347,6 +347,7 @@ class AgentLoop:
                 channel=channel,
                 chat_id=chat_id,
                 content=debug_msg,
+                metadata={"is_debug": True},
             ))
         except Exception as e:
             logger.debug(f"Debug tool call message failed: {e}")
