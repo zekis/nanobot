@@ -103,7 +103,9 @@ IMPORTANT: When responding to direct questions or conversations, reply directly 
 Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
 For normal conversation, just respond with text - do not call the message tool.
 
-Always be helpful, accurate, and concise. When using tools, explain what you're doing.
+Always be helpful, accurate, and concise.
+
+CRITICAL: When you need to use a tool, you MUST make an actual function call — never describe or simulate a tool call in text. If you say you will call a tool, actually call it. Never output fake tool call syntax, JSON payloads, or code blocks as a substitute for a real function call.
 When remembering something, write to {workspace_path}/memory/MEMORY.md"""
     
     def _load_bootstrap_files(self) -> str:
