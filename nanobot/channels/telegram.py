@@ -13,7 +13,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from nanobot.config.schema import TelegramConfig
+from nanobot.config.schema import DebugConfig, TelegramConfig
 
 if TYPE_CHECKING:
     from nanobot.session.manager import SessionManager
@@ -95,6 +95,8 @@ class TelegramChannel(BaseChannel):
     BOT_COMMANDS = [
         BotCommand("start", "Start the bot"),
         BotCommand("reset", "Reset conversation history"),
+        BotCommand("debug", "Toggle debug mode (tool call logging)"),
+        BotCommand("usage", "Toggle token usage stats on messages"),
         BotCommand("help", "Show available commands"),
     ]
     
@@ -104,11 +106,13 @@ class TelegramChannel(BaseChannel):
         bus: MessageBus,
         groq_api_key: str = "",
         session_manager: SessionManager | None = None,
+        debug_config: DebugConfig | None = None,
     ):
         super().__init__(config, bus)
         self.config: TelegramConfig = config
         self.groq_api_key = groq_api_key
         self.session_manager = session_manager
+        self.debug_config = debug_config or DebugConfig()
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing loop task
@@ -130,6 +134,8 @@ class TelegramChannel(BaseChannel):
         # Add command handlers
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("reset", self._on_reset))
+        self._app.add_handler(CommandHandler("debug", self._on_debug))
+        self._app.add_handler(CommandHandler("usage", self._on_usage))
         self._app.add_handler(CommandHandler("help", self._on_help))
         
         # Add message handler for text, photos, voice, documents
@@ -250,15 +256,48 @@ class TelegramChannel(BaseChannel):
         logger.info(f"Session reset for {session_key} (cleared {msg_count} messages)")
         await update.message.reply_text("🔄 Conversation history cleared. Let's start fresh!")
     
+    async def _on_debug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /debug command — toggle tool call logging."""
+        if not update.message:
+            return
+
+        self.debug_config.log_tool_calls = not self.debug_config.log_tool_calls
+        state = "ON" if self.debug_config.log_tool_calls else "OFF"
+        logger.info(f"Debug tool call logging toggled: {state}")
+        await update.message.reply_text(
+            f"🔧 Debug mode: <b>{state}</b>\n"
+            f"{'Tool calls will be logged to chat.' if self.debug_config.log_tool_calls else 'Tool call logging disabled.'}",
+            parse_mode="HTML",
+        )
+
+    async def _on_usage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /usage command — toggle token usage stats on messages."""
+        if not update.message:
+            return
+
+        self.debug_config.show_token_usage = not self.debug_config.show_token_usage
+        state = "ON" if self.debug_config.show_token_usage else "OFF"
+        logger.info(f"Token usage display toggled: {state}")
+        await update.message.reply_text(
+            f"📊 Token usage stats: <b>{state}</b>\n"
+            f"{'Usage will be shown after each response.' if self.debug_config.show_token_usage else 'Usage stats hidden.'}",
+            parse_mode="HTML",
+        )
+
     async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /help command — show available commands."""
         if not update.message:
             return
-        
+
+        debug_state = "on" if self.debug_config.log_tool_calls else "off"
+        usage_state = "on" if self.debug_config.show_token_usage else "off"
+
         help_text = (
             "🐈 <b>nanobot commands</b>\n\n"
             "/start — Start the bot\n"
             "/reset — Reset conversation history\n"
+            f"/debug — Toggle debug mode ({debug_state})\n"
+            f"/usage — Toggle token usage stats ({usage_state})\n"
             "/help — Show this help message\n\n"
             "Just send me a text message to chat!"
         )

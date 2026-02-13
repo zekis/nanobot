@@ -260,8 +260,9 @@ def gateway(
         enabled=True
     )
     
-    # Create channel manager
-    channels = ChannelManager(config, bus, session_manager=session_manager)
+    # Create channel manager — shares the same debug_config object as the
+    # agent so /debug and /usage commands take effect immediately.
+    channels = ChannelManager(config, bus, session_manager=session_manager, debug_config=config.debug)
     
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")

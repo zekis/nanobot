@@ -208,20 +208,27 @@ class AgentLoop:
             retrieved_memories=retrieved_memories,
         )
         
-        # Agent loop
+        # Agent loop — track cumulative token usage across iterations
         iteration = 0
         final_content = None
-        
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             # Call LLM
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model
             )
-            
+
+            # Accumulate token usage from every LLM call
+            iter_usage = response.usage or {}
+            total_prompt_tokens += iter_usage.get("prompt_tokens", 0)
+            total_completion_tokens += iter_usage.get("completion_tokens", 0)
+
             # Handle tool calls
             if response.has_tool_calls:
                 # Add assistant message with tool calls
@@ -282,23 +289,33 @@ class AgentLoop:
                     completion_tokens=usage.get("completion_tokens", 0),
                     total_tokens=usage.get("total_tokens", 0))
                 break
-        
+
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-        
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
-        
-        # Save to session
+
+        # Save to session (clean content without usage footer)
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
-        
+
+        # Append token usage footer for display only (not saved to session)
+        display_content = final_content
+        if self.debug_config.show_token_usage:
+            total_tokens = total_prompt_tokens + total_completion_tokens
+            display_content += (
+                f"\n\n---\n"
+                f"📊 `{total_prompt_tokens}` in · `{total_completion_tokens}` out · "
+                f"`{total_tokens}` total · `{iteration}` call{'s' if iteration != 1 else ''}"
+            )
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=final_content
+            content=display_content
         )
     
     async def _emit_event(self, event_type: str, **kwargs) -> None:

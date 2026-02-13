@@ -131,6 +131,7 @@ class MemoryConfig(BaseModel):
 class DebugConfig(BaseModel):
     """Debug configuration for development and troubleshooting."""
     log_tool_calls: bool = False  # Send tool call details (name, args, result) to the chat channel
+    show_token_usage: bool = False  # Append token usage stats to every assistant message
 
 
 class Config(BaseSettings):
