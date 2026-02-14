@@ -175,8 +175,11 @@ class AgentLoop:
             session_key=msg.session_key, channel=msg.channel,
             role="user", content=msg.content)
 
-        # Get or create session
-        session = self.sessions.get_or_create(msg.session_key)
+        # Get or create session — use explicit session_id from metadata
+        # when available (e.g. API /chat passes session_id for conversation
+        # continuity while using a unique request_id as chat_id for routing)
+        effective_session_key = msg.metadata.get("session_id") or msg.session_key
+        session = self.sessions.get_or_create(effective_session_key)
 
         # Update tool contexts
         message_tool = self.tools.get("message")
