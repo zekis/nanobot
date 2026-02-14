@@ -275,12 +275,66 @@ def gateway(
     
     console.print(f"[green]✓[/green] Heartbeat: every 30m")
     
+    def _get_gateway_creds():
+        """Read skill_gateway.json for Frappe API credentials."""
+        import json as _json
+        gw_path = config.workspace_path / "skill_gateway.json"
+        if not gw_path.exists():
+            return None
+        try:
+            data = _json.loads(gw_path.read_text(encoding="utf-8"))
+            url = data.get("url", "")
+            api_key = data.get("api_key", "")
+            api_secret = data.get("api_secret", "")
+            nanobot_token = data.get("nanobot_token", "")
+            if all([url, api_key, api_secret, nanobot_token]):
+                return {
+                    "url": url.rstrip("/"),
+                    "api_key": api_key,
+                    "api_secret": api_secret,
+                    "nanobot_token": nanobot_token,
+                }
+        except Exception:
+            pass
+        return None
+
+    async def _deliver_to_messaging(response, notice_type="message"):
+        """Deliver a notice response to the Frappe messaging app via API."""
+        import aiohttp
+        creds = _get_gateway_creds()
+        if not creds or not response:
+            return False
+        try:
+            url = f"{creds['url']}/api/method/nanonet.api.messaging.deliver_bot_message"
+            auth_header = f"token {creds['api_key']}:{creds['api_secret']}"
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json={
+                        "nanobot_token": creds["nanobot_token"],
+                        "content": response,
+                        "notice_type": notice_type,
+                    },
+                    headers={"Authorization": auth_header},
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    if resp.status == 200:
+                        console.print(f"[green]✓[/green] {notice_type} delivered to messaging app")
+                        return True
+                    else:
+                        body = await resp.text()
+                        console.print(f"[yellow]Warning: Messaging delivery returned {resp.status}: {body[:200]}[/yellow]")
+                        return False
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to deliver to messaging: {e}[/yellow]")
+            return False
+
     async def check_redeployment_notice():
         """Check for REDEPLOYMENT_NOTICE.md on startup and prompt the agent."""
         notice_path = config.workspace_path / "REDEPLOYMENT_NOTICE.md"
         if not notice_path.exists():
             return
-        # Wait for channels (e.g. Telegram) to connect before prompting
+        # Wait for the API channel to be ready
         await asyncio.sleep(10)
         try:
             notice = notice_path.read_text(encoding="utf-8").strip()
@@ -290,35 +344,17 @@ def gateway(
 
             console.print("[green]✓[/green] Redeployment notice found, prompting agent...")
 
-            # Determine where to deliver the response.
-            # Prefer Telegram if configured, otherwise process silently.
-            deliver_channel = None
-            deliver_chat_id = None
-            if config.channels.telegram.enabled and config.channels.telegram.allow_from:
-                deliver_channel = "telegram"
-                deliver_chat_id = str(config.channels.telegram.allow_from[0])
-
-            # Use the delivery channel so the agent's tool context (message,
-            # spawn, cron) is set to the correct destination.
-            ch = deliver_channel or "cli"
-            cid = deliver_chat_id or "direct"
-
+            # Use the messaging session so the agent's context is tied to the DM
             response = await agent.process_direct(
                 notice,
-                session_key=f"{ch}:{cid}",
-                channel=ch,
-                chat_id=cid,
+                session_key="messaging:redeployment",
+                channel="messaging",
+                chat_id="redeployment",
             )
 
-            # Publish the response to the channel (process_direct returns
-            # the content string but does not publish via the bus).
-            if deliver_channel and deliver_chat_id and response:
-                from nanobot.bus.events import OutboundMessage
-                await bus.publish_outbound(OutboundMessage(
-                    channel=deliver_channel,
-                    chat_id=deliver_chat_id,
-                    content=response,
-                ))
+            # Deliver response to the Frappe messaging app
+            if response:
+                await _deliver_to_messaging(response, notice_type="redeployment")
 
             # Remove after processing so it doesn't re-trigger on normal restarts
             notice_path.unlink(missing_ok=True)
@@ -330,7 +366,7 @@ def gateway(
         notice_path = config.workspace_path / "STARTUP_NOTICE.md"
         if not notice_path.exists():
             return
-        # Wait for channels (e.g. Telegram) to connect before prompting
+        # Wait for the API channel to be ready
         await asyncio.sleep(10)
         try:
             notice = notice_path.read_text(encoding="utf-8").strip()
@@ -340,31 +376,17 @@ def gateway(
 
             console.print("[green]✓[/green] Startup notice found, sending greeting...")
 
-            # Determine where to deliver the response.
-            # Prefer Telegram if configured, otherwise process silently.
-            deliver_channel = None
-            deliver_chat_id = None
-            if config.channels.telegram.enabled and config.channels.telegram.allow_from:
-                deliver_channel = "telegram"
-                deliver_chat_id = str(config.channels.telegram.allow_from[0])
-
-            ch = deliver_channel or "cli"
-            cid = deliver_chat_id or "direct"
-
+            # Use the messaging session so the agent's context is tied to the DM
             response = await agent.process_direct(
                 notice,
-                session_key=f"{ch}:{cid}",
-                channel=ch,
-                chat_id=cid,
+                session_key="messaging:startup",
+                channel="messaging",
+                chat_id="startup",
             )
 
-            if deliver_channel and deliver_chat_id and response:
-                from nanobot.bus.events import OutboundMessage
-                await bus.publish_outbound(OutboundMessage(
-                    channel=deliver_channel,
-                    chat_id=deliver_chat_id,
-                    content=response,
-                ))
+            # Deliver response to the Frappe messaging app
+            if response:
+                await _deliver_to_messaging(response, notice_type="startup")
 
             # Remove after processing so it doesn't re-trigger on normal restarts
             notice_path.unlink(missing_ok=True)
