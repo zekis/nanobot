@@ -135,6 +135,11 @@ class AgentLoop:
                 try:
                     response = await self._process_message(msg)
                     if response:
+                        # Mark as final so the API channel knows to resolve
+                        # the pending HTTP request.  Intermediate messages
+                        # (debug tool calls, message-tool sends) are NOT
+                        # marked and will be skipped by ApiChannel.send().
+                        response.metadata["is_final"] = True
                         await self.bus.publish_outbound(response)
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
@@ -142,7 +147,8 @@ class AgentLoop:
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=f"Sorry, I encountered an error: {str(e)}"
+                        content=f"Sorry, I encountered an error: {str(e)}",
+                        metadata={"is_final": True},
                     ))
             except asyncio.TimeoutError:
                 continue

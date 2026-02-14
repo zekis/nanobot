@@ -84,9 +84,22 @@ class ApiChannel(BaseChannel):
         """
         Resolve a pending chat request with the agent's response.
 
-        The chat_id on the OutboundMessage matches the request_id
-        we stored when the HTTP request came in.
+        Only messages marked with ``is_final`` in metadata actually
+        resolve the pending HTTP request.  Intermediate messages
+        (debug tool-call logs, ``message``-tool sends) are silently
+        skipped so they don't consume the Future before the real
+        response arrives.
         """
+        if not msg.metadata.get("is_final"):
+            # Intermediate message (debug, message-tool, etc.) — skip.
+            # The Telegram channel would send these, but the API channel
+            # is request/response and can only return one response.
+            logger.debug(
+                f"Skipping non-final message for chat_id={msg.chat_id} "
+                f"(metadata={msg.metadata})"
+            )
+            return
+
         future = self._pending.pop(msg.chat_id, None)
         if future and not future.done():
             future.set_result(msg.content)
