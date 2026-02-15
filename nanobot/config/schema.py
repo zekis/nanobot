@@ -132,6 +132,7 @@ class DebugConfig(BaseModel):
     """Debug configuration for development and troubleshooting."""
     log_tool_calls: bool = False  # Send tool call details (name, args, result) to the chat channel
     show_token_usage: bool = False  # Append token usage stats to every assistant message
+    log_llm_context: bool = False  # Write full LLM request/response to .debug/last_llm_call.json
 
 
 class Config(BaseSettings):

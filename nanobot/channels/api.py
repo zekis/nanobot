@@ -137,12 +137,19 @@ class ApiChannel(BaseChannel):
         future: asyncio.Future = loop.create_future()
         self._pending[request_id] = future
 
+        # Build metadata — merge caller-provided metadata (e.g. context_token
+        # for race-safe approval routing) with internal routing fields.
+        metadata = {"session_id": session_id, "request_id": request_id}
+        caller_metadata = data.get("metadata")
+        if isinstance(caller_metadata, dict):
+            metadata.update(caller_metadata)
+
         # Publish to the message bus
         await self._handle_message(
             sender_id=session_id,
             chat_id=request_id,
             content=message,
-            metadata={"session_id": session_id, "request_id": request_id},
+            metadata=metadata,
         )
 
         # Wait for the agent to respond (timeout after 120 seconds)

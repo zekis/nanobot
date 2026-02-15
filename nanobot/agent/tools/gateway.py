@@ -37,6 +37,17 @@ class GatewayTool(Tool):
         self._gateway_url = gateway_url.rstrip("/")
         self._auth = f"token {api_key}:{api_secret}"
         self._nanobot_token = nanobot_token
+        self._metadata: dict[str, Any] = {}
+
+    def set_metadata(self, metadata: dict[str, Any]) -> None:
+        """Store per-request metadata from the inbound message.
+
+        Called by the agent loop before processing each message so that
+        gateway tool calls can forward opaque metadata (e.g. context_token
+        for race-safe approval routing) back to the Frappe execute_tool
+        endpoint.
+        """
+        self._metadata = metadata or {}
 
     @property
     def name(self) -> str:
@@ -57,6 +68,10 @@ class GatewayTool(Tool):
             "params": kwargs,
             "nanobot_token": self._nanobot_token,
         }
+        # Thread context_token from message metadata for race-safe approval routing
+        context_token = self._metadata.get("context_token")
+        if context_token:
+            payload["context_token"] = context_token
 
         try:
             async with httpx.AsyncClient() as client:

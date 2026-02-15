@@ -200,6 +200,12 @@ class AgentLoop:
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
 
+        # Propagate message metadata to gateway tools so they can forward
+        # opaque fields (e.g. context_token) back to the Frappe API.
+        for tool in self.tools._tools.values():
+            if hasattr(tool, "set_metadata"):
+                tool.set_metadata(msg.metadata)
+
         # Retrieve relevant memories if enabled
         retrieved_memories = await self._retrieve_memories(msg.content)
         if retrieved_memories:
@@ -232,6 +238,9 @@ class AgentLoop:
                 tools=self.tools.get_definitions(),
                 model=self.model
             )
+
+            # Write debug dump of the LLM call if enabled
+            self._dump_llm_call(messages, response, iteration)
 
             # Accumulate token usage from every LLM call
             iter_usage = response.usage or {}
@@ -584,3 +593,67 @@ class AgentLoop:
         
         response = await self._process_message(msg)
         return response.content if response else ""
+
+    def _dump_llm_call(self, messages: list[dict], response: Any, iteration: int) -> None:
+        """Write the last LLM request/response to a debug file.
+
+        Only writes when debug_config.log_llm_context is enabled.
+        The file is written to .debug/last_llm_call.json in the workspace
+        so the Frappe host can read it from the mounted volume.
+
+        Overwrites on every call so it always reflects the most recent
+        LLM interaction (including mid-loop tool iterations).
+        """
+        if not self.debug_config.log_llm_context:
+            return
+
+        try:
+            from datetime import datetime
+
+            debug_dir = self.workspace / ".debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            # Separate system prompt from history and user message
+            system_prompt = None
+            history = []
+            user_message = None
+
+            for m in messages:
+                role = m.get("role", "")
+                if role == "system":
+                    system_prompt = m.get("content", "")
+                elif role == "user":
+                    user_message = m  # last one wins
+                    history.append(m)
+                else:
+                    history.append(m)
+
+            # Remove the system message and current user message from
+            # history for clarity (they're shown separately)
+            if history and history[-1] is user_message:
+                history = history[:-1]
+
+            dump = {
+                "timestamp": datetime.now().isoformat(),
+                "iteration": iteration,
+                "model": self.model,
+                "system_prompt": system_prompt,
+                "system_prompt_tokens": len(system_prompt.split()) if system_prompt else 0,
+                "history_message_count": len(history),
+                "history": history,
+                "user_message": user_message.get("content", "") if user_message else "",
+                "response": {
+                    "content": response.content,
+                    "has_tool_calls": response.has_tool_calls,
+                    "tool_calls": [
+                        {"name": tc.name, "arguments": tc.arguments}
+                        for tc in (response.tool_calls or [])
+                    ],
+                    "usage": response.usage,
+                },
+            }
+
+            dump_path = debug_dir / "last_llm_call.json"
+            dump_path.write_text(json.dumps(dump, indent=2, default=str))
+        except Exception as e:
+            logger.debug(f"Failed to write LLM debug dump: {e}")
