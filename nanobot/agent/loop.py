@@ -331,8 +331,10 @@ class AgentLoop:
         self.sessions.save(session)
 
         # Update task list via secondary LLM call + sync to Frappe
-        await self._update_task_list(session, msg.content, final_content, tool_actions, msg.channel)
-        self.sessions.save(session)  # save again with updated metadata
+        frappe_channel = self._extract_frappe_channel(msg.metadata)
+        if frappe_channel:
+            await self._update_task_list(session, msg.content, final_content, tool_actions, frappe_channel)
+            self.sessions.save(session)  # save again with updated metadata
 
         # Append token usage footer for display only (not saved to session)
         display_content = final_content
@@ -582,8 +584,10 @@ class AgentLoop:
         self.sessions.save(session)
 
         # Update task list via secondary LLM call + sync to Frappe
-        await self._update_task_list(session, msg.content, final_content, tool_actions, origin_channel)
-        self.sessions.save(session)
+        frappe_channel = self._extract_frappe_channel(msg.metadata)
+        if frappe_channel:
+            await self._update_task_list(session, msg.content, final_content, tool_actions, frappe_channel)
+            self.sessions.save(session)
 
         return OutboundMessage(
             channel=origin_channel,
@@ -619,6 +623,32 @@ class AgentLoop:
         
         response = await self._process_message(msg)
         return response.content if response else ""
+
+    @staticmethod
+    def _extract_frappe_channel(metadata: dict) -> str | None:
+        """Extract the Frappe Nanonet Channel name from message metadata.
+
+        The session_id follows these patterns:
+          nanonet-messaging:{channel}[:v{N}]
+          nanonet-dm:{channel}
+          nanonet-ctx:{channel}:{bot_name}
+
+        Returns None if the session_id is missing or doesn't match.
+        """
+        session_id = (metadata or {}).get("session_id", "")
+        if not session_id:
+            return None
+
+        for prefix in ("nanonet-messaging:", "nanonet-dm:", "nanonet-ctx:"):
+            if session_id.startswith(prefix):
+                remainder = session_id[len(prefix):]
+                # Strip version suffix (:v2) or bot name suffix (:bot-name)
+                # Channel names are Frappe hashes (alphanumeric, ~10 chars)
+                parts = remainder.split(":")
+                if parts and parts[0]:
+                    return parts[0]
+
+        return None
 
     @staticmethod
     def _summarize_args(tool_name: str, arguments: dict) -> str:
