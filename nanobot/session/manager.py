@@ -52,9 +52,91 @@ class Session:
         # Convert to LLM format (just role and content)
         return [{"role": m["role"], "content": m["content"]} for m in recent]
     
+    def get_structured_context(
+        self,
+        recent_pairs: int = 3,
+        max_tool_entries: int = 30,
+    ) -> dict[str, Any]:
+        """Build structured context instead of raw history dump.
+
+        Instead of returning all messages as raw history, decomposes the
+        session into three parts:
+        - recent_pairs: last N user+assistant exchanges as LLM-format dicts
+        - task_list: LLM-maintained task list from session metadata
+        - tool_log: chronological tool action summaries from older messages
+
+        This prevents history contamination where older assistant messages
+        that describe tool actions (instead of calling them) teach the model
+        bad behavior via in-context learning.
+
+        Args:
+            recent_pairs: Number of user+assistant pairs to include as
+                actual LLM messages.
+            max_tool_entries: Maximum tool action entries to include.
+
+        Returns:
+            Dict with recent_pairs, task_list, and tool_log keys.
+        """
+        # --- Recent pairs (last N user+assistant exchanges) ---
+        pairs: list[tuple[dict, dict]] = []
+        idx = len(self.messages) - 1
+        while idx >= 0 and len(pairs) < recent_pairs:
+            m = self.messages[idx]
+            if m["role"] == "assistant" and idx > 0 and self.messages[idx - 1]["role"] == "user":
+                pairs.append((self.messages[idx - 1], m))
+                idx -= 2
+            else:
+                idx -= 1
+
+        pairs.reverse()  # chronological order
+        recent: list[dict[str, Any]] = []
+        for user_m, asst_m in pairs:
+            recent.append({"role": "user", "content": user_m["content"]})
+            recent.append({"role": "assistant", "content": asst_m["content"]})
+
+        # Indices of messages included in recent pairs (to exclude from older context)
+        recent_indices: set[int] = set()
+        idx = len(self.messages) - 1
+        pairs_found = 0
+        while idx >= 0 and pairs_found < recent_pairs:
+            m = self.messages[idx]
+            if m["role"] == "assistant" and idx > 0 and self.messages[idx - 1]["role"] == "user":
+                recent_indices.add(idx)
+                recent_indices.add(idx - 1)
+                pairs_found += 1
+                idx -= 2
+            else:
+                idx -= 1
+
+        # --- Task list (LLM-maintained, from session metadata) ---
+        task_list = self.metadata.get("task_list", [])
+
+        # --- Tool log (from tool_actions stored on older assistant messages) ---
+        tool_entries: list[dict[str, str]] = []
+        for i, m in enumerate(self.messages):
+            if i in recent_indices:
+                continue
+            if m["role"] != "assistant":
+                continue
+            for action in m.get("tool_actions", []):
+                tool_entries.append({
+                    "timestamp": m.get("timestamp", ""),
+                    "tool": action.get("tool", "unknown"),
+                    "args_summary": action.get("args_summary", ""),
+                    "outcome": action.get("outcome", ""),
+                })
+        tool_entries = tool_entries[-max_tool_entries:]
+
+        return {
+            "recent_pairs": recent,
+            "task_list": task_list,
+            "tool_log": tool_entries,
+        }
+
     def clear(self) -> None:
         """Clear all messages in the session."""
         self.messages = []
+        self.metadata = {}
         self.updated_at = datetime.now()
 
 

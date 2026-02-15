@@ -122,8 +122,9 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
     
     def build_messages(
         self,
-        history: list[dict[str, Any]],
         current_message: str,
+        structured_context: dict[str, Any] | None = None,
+        history: list[dict[str, Any]] | None = None,
         skill_names: list[str] | None = None,
         media: list[str] | None = None,
         channel: str | None = None,
@@ -133,9 +134,19 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         """
         Build the complete message list for an LLM call.
 
+        When structured_context is provided, the task list and tool log
+        are formatted into the system prompt, and only recent message
+        pairs are included as actual LLM history. This prevents history
+        contamination from older assistant messages that described tool
+        actions in prose instead of making tool calls.
+
+        Falls back to the old behavior (raw history dump) when only
+        the deprecated ``history`` parameter is provided.
+
         Args:
-            history: Previous conversation messages.
             current_message: The new user message.
+            structured_context: Structured context from Session.get_structured_context().
+            history: (Deprecated) Raw previous conversation messages.
             skill_names: Optional skills to include.
             media: Optional list of local file paths for images/media.
             channel: Current channel (telegram, feishu, etc.).
@@ -154,18 +165,66 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         if retrieved_memories:
             system_prompt += f"\n\n---\n\n{retrieved_memories}"
 
+        # Inject structured context summary into system prompt
+        if structured_context:
+            context_block = self._format_context_summary(structured_context)
+            if context_block:
+                system_prompt += f"\n\n---\n\n{context_block}"
+
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})
 
-        # History
-        messages.extend(history)
+        # History — structured context or raw fallback
+        if structured_context:
+            messages.extend(structured_context.get("recent_pairs", []))
+        elif history:
+            messages.extend(history)
 
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)
         messages.append({"role": "user", "content": user_content})
 
         return messages
+
+    @staticmethod
+    def _format_context_summary(ctx: dict[str, Any]) -> str:
+        """Format structured context into a system prompt section.
+
+        Produces a markdown block with the task list and tool execution
+        history. These go into the system prompt so the LLM has factual
+        context about the conversation without being exposed to
+        potentially contaminated assistant prose from older messages.
+        """
+        parts = []
+
+        # Task list
+        task_list = ctx.get("task_list", [])
+        if task_list:
+            task_lines = []
+            for t in task_list:
+                task_lines.append(f"- [{t.get('status', 'pending')}] {t.get('task', '')}")
+            parts.append(
+                "## Current Task List\n"
+                + "\n".join(task_lines)
+            )
+
+        # Tool log
+        tool_log = ctx.get("tool_log", [])
+        if tool_log:
+            tool_lines = []
+            for entry in tool_log:
+                tool = entry.get("tool", "?")
+                args = entry.get("args_summary", "")
+                outcome = entry.get("outcome", "")
+                tool_lines.append(f"- **{tool}**({args}) -> {outcome}")
+            parts.append(
+                "## Tool Execution History\n"
+                "These tools were called during previous turns in this conversation:\n"
+                + "\n".join(tool_lines)
+            )
+
+        return "\n\n".join(parts)
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ from nanobot.agent.tools.gateway import load_gateway_tools
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.subagent import SubagentManager
-from nanobot.session.manager import SessionManager
+from nanobot.session.manager import Session, SessionManager
 
 
 class AgentLoop:
@@ -213,9 +214,10 @@ class AgentLoop:
                 session_key=msg.session_key, channel=msg.channel,
                 role="system", content=retrieved_memories)
 
-        # Build initial messages (use get_history for LLM-formatted messages)
+        # Build initial messages with structured context
+        structured_ctx = session.get_structured_context()
         messages = self.context.build_messages(
-            history=session.get_history(),
+            structured_context=structured_ctx,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
@@ -228,6 +230,7 @@ class AgentLoop:
         final_content = None
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        tool_actions: list[dict[str, str]] = []  # tool summaries for session storage
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -282,6 +285,13 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
 
+                    # Capture tool summary for session storage
+                    tool_actions.append({
+                        "tool": tool_call.name,
+                        "args_summary": self._summarize_args(tool_call.name, tool_call.arguments),
+                        "outcome": self._summarize_outcome(result),
+                    })
+
                     # Emit tool_result event
                     await self._emit_event("tool_result",
                         session_key=msg.session_key, channel=msg.channel,
@@ -317,8 +327,12 @@ class AgentLoop:
 
         # Save to session (clean content without usage footer)
         session.add_message("user", msg.content)
-        session.add_message("assistant", final_content)
+        session.add_message("assistant", final_content, tool_actions=tool_actions)
         self.sessions.save(session)
+
+        # Update task list via secondary LLM call + sync to Frappe
+        await self._update_task_list(session, msg.content, final_content, tool_actions, msg.channel)
+        self.sessions.save(session)  # save again with updated metadata
 
         # Append token usage footer for display only (not saved to session)
         display_content = final_content
@@ -496,17 +510,19 @@ class AgentLoop:
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
         
-        # Build messages with the announce content
+        # Build messages with structured context
+        structured_ctx = session.get_structured_context()
         messages = self.context.build_messages(
-            history=session.get_history(),
+            structured_context=structured_ctx,
             current_message=msg.content,
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        
+
         # Agent loop (limited for announce handling)
         iteration = 0
         final_content = None
+        tool_actions: list[dict[str, str]] = []
         
         while iteration < self.max_iterations:
             iteration += 1
@@ -542,6 +558,12 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
 
+                    tool_actions.append({
+                        "tool": tool_call.name,
+                        "args_summary": self._summarize_args(tool_call.name, tool_call.arguments),
+                        "outcome": self._summarize_outcome(result),
+                    })
+
                     # Send debug message to origin channel if enabled
                     await self._debug_tool_call(
                         origin_channel, origin_chat_id,
@@ -556,9 +578,13 @@ class AgentLoop:
         
         # Save to session (mark as system message in history)
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-        session.add_message("assistant", final_content)
+        session.add_message("assistant", final_content, tool_actions=tool_actions)
         self.sessions.save(session)
-        
+
+        # Update task list via secondary LLM call + sync to Frappe
+        await self._update_task_list(session, msg.content, final_content, tool_actions, origin_channel)
+        self.sessions.save(session)
+
         return OutboundMessage(
             channel=origin_channel,
             chat_id=origin_chat_id,
@@ -593,6 +619,138 @@ class AgentLoop:
         
         response = await self._process_message(msg)
         return response.content if response else ""
+
+    @staticmethod
+    def _summarize_args(tool_name: str, arguments: dict) -> str:
+        """Human-readable summary of tool arguments (max 200 chars)."""
+        if tool_name == "exec":
+            return (arguments.get("command", "") or "")[:180]
+        if tool_name in ("read_file", "write_file", "edit_file"):
+            return (arguments.get("path", "") or "")[:200]
+        if tool_name == "web_search":
+            return (arguments.get("query", "") or "")[:200]
+        if tool_name == "web_fetch":
+            return (arguments.get("url", "") or "")[:200]
+        if tool_name == "message":
+            ch = arguments.get("channel", "")
+            txt = (arguments.get("text", "") or "")[:100]
+            return f"channel={ch} text={txt}"
+        raw = json.dumps(arguments, ensure_ascii=False)
+        return raw[:200] + "..." if len(raw) > 200 else raw
+
+    @staticmethod
+    def _summarize_outcome(result: str | None) -> str:
+        """Short summary of tool result (max 300 chars)."""
+        if not result:
+            return "OK: (empty)"
+        is_error = result.lower().startswith("error")
+        prefix = "ERROR: " if is_error else "OK: "
+        first_line = result.split("\n", 1)[0].strip()
+        max_len = 300 - len(prefix)
+        if len(first_line) > max_len:
+            first_line = first_line[:max_len] + "..."
+        return prefix + first_line
+
+    async def _update_task_list(
+        self,
+        session: Session,
+        user_message: str,
+        assistant_response: str,
+        tool_actions: list[dict[str, str]],
+        channel: str,
+    ) -> None:
+        """Update the session task list via a secondary LLM call.
+
+        1. Calls LLM to analyze the exchange and produce an updated task list
+        2. Stores in session.metadata for context injection
+        3. POSTs to Frappe API for messaging app display
+        """
+        current_tasks = session.metadata.get("task_list", [])
+
+        if current_tasks:
+            tasks_text = "\n".join(
+                f"- [{t['status']}] {t['task']}" for t in current_tasks
+            )
+        else:
+            tasks_text = "(no tasks yet)"
+
+        if tool_actions:
+            tools_text = "\n".join(
+                f"- {a['tool']}({a['args_summary']}) -> {a['outcome']}"
+                for a in tool_actions
+            )
+        else:
+            tools_text = "(no tools used)"
+
+        prompt = (
+            "Update the task list based on this conversation exchange.\n\n"
+            f"CURRENT TASK LIST:\n{tasks_text}\n\n"
+            f"USER MESSAGE:\n{user_message}\n\n"
+            f"TOOLS USED:\n{tools_text}\n\n"
+            f"ASSISTANT RESPONSE:\n{assistant_response[:500]}\n\n"
+            "Rules:\n"
+            "- Add new tasks from the user's request (if any)\n"
+            '- Mark tasks as "completed" if the assistant fulfilled them this turn\n'
+            "- Keep existing incomplete tasks unchanged\n"
+            "- Merge duplicate/similar tasks\n"
+            "- Maximum 10 tasks total (drop oldest completed if over limit)\n"
+            "- Each task: short description (under 80 chars)\n\n"
+            'Return ONLY a JSON array. Each element: {"task": "description", "status": "pending|in_progress|completed"}\n'
+            "No markdown, no explanation — just the JSON array."
+        )
+
+        try:
+            response = await self.provider.chat(
+                messages=[
+                    {"role": "system", "content": "You are a task tracker. Output only valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                tools=[],
+                model=self.model,
+            )
+
+            text = response.content.strip()
+            json_match = re.search(r'\[.*\]', text, re.DOTALL)
+            if json_match:
+                task_list = json.loads(json_match.group())
+                validated = []
+                for t in task_list[:10]:
+                    if isinstance(t, dict) and "task" in t and "status" in t:
+                        validated.append({
+                            "task": str(t["task"])[:80],
+                            "status": t["status"] if t["status"] in ("pending", "in_progress", "completed") else "pending",
+                        })
+                session.metadata["task_list"] = validated
+                await self._post_task_list_to_frappe(channel, validated)
+        except Exception as e:
+            logger.debug(f"Failed to update task list: {e}")
+
+    async def _post_task_list_to_frappe(self, channel: str, task_list: list) -> None:
+        """POST the task list to Frappe API for messaging app display."""
+        if not self.webhook_emitter:
+            return
+
+        hooks = getattr(self.webhook_emitter, "config", None)
+        if not hooks or not getattr(hooks, "webhook_url", None):
+            return
+
+        # Derive task list URL from webhook URL base
+        # webhookUrl: https://site/api/method/nanonet.api.events.receive
+        base_url = hooks.webhook_url.rsplit("/", 1)[0]
+        url = f"{base_url}/nanonet.api.tasks.update_task_list"
+
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                await client.post(url, json={
+                    "nanobot_token": hooks.nanobot_token,
+                    "channel": channel,
+                    "task_list": task_list,
+                }, headers={
+                    "Authorization": hooks.webhook_auth,
+                })
+        except Exception as e:
+            logger.debug(f"Failed to sync task list to Frappe: {e}")
 
     def _dump_llm_call(self, messages: list[dict], response: Any, iteration: int) -> None:
         """Write the last LLM request/response to a debug file.
