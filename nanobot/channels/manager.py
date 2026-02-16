@@ -43,20 +43,7 @@ class ChannelManager:
     def _init_channels(self) -> None:
         """Initialize channels based on config."""
         
-        # Telegram channel
-        if self.config.channels.telegram.enabled:
-            try:
-                from nanobot.channels.telegram import TelegramChannel
-                self.channels["telegram"] = TelegramChannel(
-                    self.config.channels.telegram,
-                    self.bus,
-                    groq_api_key=self.config.providers.groq.api_key,
-                    session_manager=self.session_manager,
-                    debug_config=self.debug_config,
-                )
-                logger.info("Telegram channel enabled")
-            except ImportError as e:
-                logger.warning(f"Telegram channel not available: {e}")
+        # Telegram channel — disabled (handled by Frappe docker manager)
         
         # WhatsApp channel
         if self.config.channels.whatsapp.enabled:

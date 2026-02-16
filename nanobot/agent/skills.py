@@ -9,6 +9,9 @@ from pathlib import Path
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
+# Built-in skills that are disabled and should not be loaded
+DISABLED_BUILTIN_SKILLS = {"cron"}
+
 
 class SkillsLoader:
     """
@@ -43,10 +46,10 @@ class SkillsLoader:
                     if skill_file.exists():
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
         
-        # Built-in skills
+        # Built-in skills (skip disabled ones)
         if self.builtin_skills and self.builtin_skills.exists():
             for skill_dir in self.builtin_skills.iterdir():
-                if skill_dir.is_dir():
+                if skill_dir.is_dir() and skill_dir.name not in DISABLED_BUILTIN_SKILLS:
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})

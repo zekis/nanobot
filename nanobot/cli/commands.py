@@ -180,8 +180,6 @@ def gateway(
     from nanobot.agent.loop import AgentLoop
     from nanobot.channels.manager import ChannelManager
     from nanobot.session.manager import SessionManager
-    from nanobot.cron.service import CronService
-    from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
     
     if verbose:
@@ -195,9 +193,8 @@ def gateway(
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
     
-    # Create cron service first (callback set after agent creation)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
+    # Cron service disabled
+    cron = None
 
     # Create webhook emitter if configured
     webhook_emitter = None
@@ -229,24 +226,7 @@ def gateway(
     if config.memory.enabled:
         console.print(f"[green]✓[/green] Memory retrieval: {config.memory.retrieval_url}")
     
-    # Set cron callback (needs agent)
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        response = await agent.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
-        if job.payload.deliver and job.payload.to:
-            from nanobot.bus.events import OutboundMessage
-            await bus.publish_outbound(OutboundMessage(
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to,
-                content=response or ""
-            ))
-        return response
-    cron.on_job = on_cron_job
+    # Cron callback disabled (cron service is off)
     
     # Create heartbeat service
     async def on_heartbeat(prompt: str) -> str:
@@ -269,9 +249,7 @@ def gateway(
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
     
-    cron_status = cron.status()
-    if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+    # Cron status disabled
     
     console.print(f"[green]✓[/green] Heartbeat: every 30m")
     
@@ -395,7 +373,6 @@ def gateway(
 
     async def run():
         try:
-            await cron.start()
             await heartbeat.start()
             await asyncio.gather(
                 agent.run(),
@@ -406,7 +383,6 @@ def gateway(
         except KeyboardInterrupt:
             console.print("\nShutting down...")
             heartbeat.stop()
-            cron.stop()
             agent.stop()
             await channels.stop_all()
     
