@@ -330,11 +330,14 @@ class AgentLoop:
         session.add_message("assistant", final_content, tool_actions=tool_actions)
         self.sessions.save(session)
 
-        # Update task list via secondary LLM call + sync to Frappe
+        # Update task list in the background — the secondary LLM call
+        # produces data for the *next* turn, so it doesn't need to block
+        # the current response.
         frappe_channel = self._extract_frappe_channel(msg.metadata)
         if frappe_channel:
-            await self._update_task_list(session, msg.content, final_content, tool_actions, frappe_channel)
-            self.sessions.save(session)  # save again with updated metadata
+            asyncio.create_task(
+                self._update_task_list_bg(session, msg.content, final_content, tool_actions, frappe_channel)
+            )
 
         # Append token usage footer for display only (not saved to session)
         display_content = final_content
@@ -583,11 +586,12 @@ class AgentLoop:
         session.add_message("assistant", final_content, tool_actions=tool_actions)
         self.sessions.save(session)
 
-        # Update task list via secondary LLM call + sync to Frappe
+        # Update task list in the background (same as _process_message)
         frappe_channel = self._extract_frappe_channel(msg.metadata)
         if frappe_channel:
-            await self._update_task_list(session, msg.content, final_content, tool_actions, frappe_channel)
-            self.sessions.save(session)
+            asyncio.create_task(
+                self._update_task_list_bg(session, msg.content, final_content, tool_actions, frappe_channel)
+            )
 
         return OutboundMessage(
             channel=origin_channel,
@@ -680,6 +684,21 @@ class AgentLoop:
         if len(first_line) > max_len:
             first_line = first_line[:max_len] + "..."
         return prefix + first_line
+
+    async def _update_task_list_bg(
+        self,
+        session: Session,
+        user_message: str,
+        assistant_response: str,
+        tool_actions: list[dict[str, str]],
+        channel: str,
+    ) -> None:
+        """Background wrapper: update task list then persist session."""
+        try:
+            await self._update_task_list(session, user_message, assistant_response, tool_actions, channel)
+            self.sessions.save(session)
+        except Exception as e:
+            logger.debug(f"Background task list update failed: {e}")
 
     async def _update_task_list(
         self,
