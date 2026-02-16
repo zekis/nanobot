@@ -307,6 +307,13 @@ def gateway(
             console.print(f"[yellow]Warning: Failed to deliver to messaging: {e}[/yellow]")
             return False
 
+    def _read_owner_dm_channel() -> str:
+        """Read the owner DM channel ID written by Frappe during deploy."""
+        dm_path = config.workspace_path / "OWNER_DM_CHANNEL"
+        if dm_path.exists():
+            return dm_path.read_text(encoding="utf-8").strip()
+        return ""
+
     async def check_redeployment_notice():
         """Check for REDEPLOYMENT_NOTICE.md on startup and prompt the agent."""
         notice_path = config.workspace_path / "REDEPLOYMENT_NOTICE.md"
@@ -322,15 +329,18 @@ def gateway(
 
             console.print("[green]✓[/green] Redeployment notice found, prompting agent...")
 
-            # Use the messaging session so the agent's context is tied to the DM
+            # Use Raven-compatible session key so webhook events route correctly
+            owner_dm = _read_owner_dm_channel()
+            session_key = f"raven:{owner_dm}" if owner_dm else "messaging:redeployment"
+
             response = await agent.process_direct(
                 notice,
-                session_key="messaging:redeployment",
-                channel="messaging",
-                chat_id="redeployment",
+                session_key=session_key,
+                channel="raven" if owner_dm else "messaging",
+                chat_id=owner_dm or "redeployment",
             )
 
-            # Deliver response to the Frappe messaging app
+            # Deliver response to Raven via Frappe API
             if response:
                 await _deliver_to_messaging(response, notice_type="redeployment")
 
@@ -354,15 +364,18 @@ def gateway(
 
             console.print("[green]✓[/green] Startup notice found, sending greeting...")
 
-            # Use the messaging session so the agent's context is tied to the DM
+            # Use Raven-compatible session key so webhook events route correctly
+            owner_dm = _read_owner_dm_channel()
+            session_key = f"raven:{owner_dm}" if owner_dm else "messaging:startup"
+
             response = await agent.process_direct(
                 notice,
-                session_key="messaging:startup",
-                channel="messaging",
-                chat_id="startup",
+                session_key=session_key,
+                channel="raven" if owner_dm else "messaging",
+                chat_id=owner_dm or "startup",
             )
 
-            # Deliver response to the Frappe messaging app
+            # Deliver response to Raven via Frappe API
             if response:
                 await _deliver_to_messaging(response, notice_type="startup")
 
