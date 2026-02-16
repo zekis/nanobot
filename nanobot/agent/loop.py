@@ -167,15 +167,19 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
 
+        # Use explicit session_id from metadata when available (e.g. API /chat
+        # passes session_id for conversation continuity).  This is used for both
+        # session lookup AND webhook events so the Frappe side receives the
+        # caller's session_id (e.g. "raven:{channel_id}") instead of the
+        # internal per-request routing ID.
+        effective_session_key = msg.metadata.get("session_id") or msg.session_key
+
         # Emit user_message event
         await self._emit_event("user_message",
-            session_key=msg.session_key, channel=msg.channel,
+            session_key=effective_session_key, channel=msg.channel,
             role="user", content=msg.content)
 
-        # Get or create session — use explicit session_id from metadata
-        # when available (e.g. API /chat passes session_id for conversation
-        # continuity while using a unique request_id as chat_id for routing)
-        effective_session_key = msg.metadata.get("session_id") or msg.session_key
+        # Get or create session
         session = self.sessions.get_or_create(effective_session_key)
 
         # Update tool contexts
@@ -193,7 +197,7 @@ class AgentLoop:
         retrieved_memories = await self._retrieve_memories(msg.content)
         if retrieved_memories:
             await self._emit_event("memory_retrieval",
-                session_key=msg.session_key, channel=msg.channel,
+                session_key=effective_session_key, channel=msg.channel,
                 role="system", content=retrieved_memories)
 
         # Build initial messages with structured context
@@ -258,7 +262,7 @@ class AgentLoop:
 
                     # Emit tool_call event
                     await self._emit_event("tool_call",
-                        session_key=msg.session_key, channel=msg.channel,
+                        session_key=effective_session_key, channel=msg.channel,
                         role="tool", tool_name=tool_call.name,
                         tool_arguments=args_str, model=self.model)
 
@@ -276,7 +280,7 @@ class AgentLoop:
 
                     # Emit tool_result event
                     await self._emit_event("tool_result",
-                        session_key=msg.session_key, channel=msg.channel,
+                        session_key=effective_session_key, channel=msg.channel,
                         role="tool", tool_name=tool_call.name,
                         content=result[:5000] if result else "")
 
@@ -292,7 +296,7 @@ class AgentLoop:
                 # Emit assistant_message event with token usage
                 usage = response.usage or {}
                 await self._emit_event("assistant_message",
-                    session_key=msg.session_key, channel=msg.channel,
+                    session_key=effective_session_key, channel=msg.channel,
                     role="assistant", content=final_content,
                     model=self.model,
                     prompt_tokens=usage.get("prompt_tokens", 0),
