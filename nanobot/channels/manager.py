@@ -87,6 +87,16 @@ class ChannelManager:
             logger.info("API channel enabled")
         except ImportError as e:
             logger.warning(f"API channel not available: {e}")
+
+        # Raven channel (always enabled - outbound-only, delivers via Frappe API)
+        try:
+            from nanobot.channels.raven import RavenChannel
+            self.channels["raven"] = RavenChannel(
+                self.config.workspace_path, self.bus
+            )
+            logger.info("Raven channel enabled")
+        except ImportError as e:
+            logger.warning(f"Raven channel not available: {e}")
     
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""
