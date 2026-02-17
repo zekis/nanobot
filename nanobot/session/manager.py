@@ -54,59 +54,79 @@ class Session:
     
     def get_structured_context(
         self,
-        recent_pairs: int = 3,
+        min_pairs: int = 3,
+        max_pairs: int = 20,
+        recency_minutes: int = 30,
         max_tool_entries: int = 30,
     ) -> dict[str, Any]:
         """Build structured context instead of raw history dump.
 
         Instead of returning all messages as raw history, decomposes the
         session into three parts:
-        - recent_pairs: last N user+assistant exchanges as LLM-format dicts
+        - recent_pairs: recent user+assistant exchanges as LLM-format dicts
         - task_list: LLM-maintained task list from session metadata
         - tool_log: chronological tool action summaries from older messages
+
+        Pair selection: always include the last ``min_pairs`` exchanges,
+        plus any additional exchanges from the last ``recency_minutes``,
+        up to ``max_pairs`` total.  This keeps recent conversations
+        coherent while avoiding unbounded history growth.
 
         This prevents history contamination where older assistant messages
         that describe tool actions (instead of calling them) teach the model
         bad behavior via in-context learning.
 
         Args:
-            recent_pairs: Number of user+assistant pairs to include as
-                actual LLM messages.
+            min_pairs: Minimum number of user+assistant pairs (always included).
+            max_pairs: Maximum pairs to include (hard cap).
+            recency_minutes: Include pairs from this many minutes ago.
             max_tool_entries: Maximum tool action entries to include.
 
         Returns:
             Dict with recent_pairs, task_list, and tool_log keys.
         """
-        # --- Recent pairs (last N user+assistant exchanges) ---
-        pairs: list[tuple[dict, dict]] = []
+        from datetime import timedelta
+
+        cutoff = datetime.now() - timedelta(minutes=recency_minutes)
+
+        # --- Collect candidate pairs walking backwards ---
+        all_pairs: list[tuple[int, int, dict, dict]] = []  # (user_idx, asst_idx, user_msg, asst_msg)
         idx = len(self.messages) - 1
-        while idx >= 0 and len(pairs) < recent_pairs:
+        while idx >= 0 and len(all_pairs) < max_pairs:
             m = self.messages[idx]
             if m["role"] == "assistant" and idx > 0 and self.messages[idx - 1]["role"] == "user":
-                pairs.append((self.messages[idx - 1], m))
+                all_pairs.append((idx - 1, idx, self.messages[idx - 1], m))
                 idx -= 2
             else:
                 idx -= 1
 
-        pairs.reverse()  # chronological order
+        # Determine how many to keep: at least min_pairs, plus any within the time window
+        keep = min(min_pairs, len(all_pairs))
+        for i in range(keep, len(all_pairs)):
+            ts = all_pairs[i][3].get("timestamp") or all_pairs[i][2].get("timestamp")
+            if ts:
+                try:
+                    msg_time = datetime.fromisoformat(ts)
+                    if msg_time >= cutoff:
+                        keep = i + 1
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            break  # Once we hit a pair outside the window, stop
+
+        selected = all_pairs[:keep]
+        selected.reverse()  # chronological order
+
         recent: list[dict[str, Any]] = []
-        for user_m, asst_m in pairs:
+        for _ui, _ai, user_m, asst_m in selected:
             recent.append({"role": "user", "content": user_m["content"]})
             recent.append({"role": "assistant", "content": asst_m["content"]})
 
         # Indices of messages included in recent pairs (to exclude from older context)
         recent_indices: set[int] = set()
-        idx = len(self.messages) - 1
-        pairs_found = 0
-        while idx >= 0 and pairs_found < recent_pairs:
-            m = self.messages[idx]
-            if m["role"] == "assistant" and idx > 0 and self.messages[idx - 1]["role"] == "user":
-                recent_indices.add(idx)
-                recent_indices.add(idx - 1)
-                pairs_found += 1
-                idx -= 2
-            else:
-                idx -= 1
+        for ui, ai, _u, _a in selected:
+            recent_indices.add(ui)
+            recent_indices.add(ai)
 
         # --- Task list (LLM-maintained, from session metadata) ---
         task_list = self.metadata.get("task_list", [])
