@@ -46,10 +46,10 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         webhook_emitter: "WebhookEmitter | None" = None,
-        memory_config: "MemoryConfig | None" = None,
+        skillgate_config: "SkillgateConfig | None" = None,
         debug_config: "DebugConfig | None" = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, MemoryConfig, DebugConfig
+        from nanobot.config.schema import ExecToolConfig, SkillgateConfig, DebugConfig
         from nanobot.cron.service import CronService
         self.bus = bus
         self.provider = provider
@@ -61,7 +61,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.webhook_emitter = webhook_emitter
-        self.memory_config = memory_config
+        self.skillgate_config = skillgate_config or SkillgateConfig()
         self.debug_config = debug_config or DebugConfig()
         
         self.context = ContextBuilder(workspace)
@@ -105,8 +105,8 @@ class AgentLoop:
         # if self.cron_service:
         #     self.tools.register(CronTool(self.cron_service))
 
-        # Gateway tools (server-side tools from skill_gateway.json)
-        for gtool in load_gateway_tools(self.workspace):
+        # Gateway tools (server-side tools from Skillgate)
+        for gtool in load_gateway_tools(self.skillgate_config):
             self.tools.register(gtool)
     
     async def run(self) -> None:
@@ -187,20 +187,8 @@ class AgentLoop:
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
 
-        # Propagate message metadata to gateway tools so they can forward
-        # opaque fields (e.g. context_token) back to the Frappe API.
-        for tool in self.tools._tools.values():
-            if hasattr(tool, "set_metadata"):
-                tool.set_metadata(msg.metadata)
-
-        # Retrieve relevant memories if enabled
-        retrieved_memories = await self._retrieve_memories(msg.content)
-        if retrieved_memories:
-            await self._emit_event("memory_retrieval",
-                session_key=effective_session_key, channel=msg.channel,
-                role="system", content=retrieved_memories)
-
         # Build initial messages with structured context
+        retrieved_memories = ""
         structured_ctx = session.get_structured_context()
         messages = self.context.build_messages(
             structured_context=structured_ctx,
@@ -396,74 +384,6 @@ class AgentLoop:
             ))
         except Exception as e:
             logger.debug(f"Debug tool call message failed: {e}")
-
-    async def _retrieve_memories(self, query: str) -> str:
-        """Retrieve relevant memories from the Frappe memory API.
-
-        Called before each LLM call to inject relevant memories into context.
-        Returns an empty string if memory retrieval is disabled, the query is
-        too short, or the API call fails.
-
-        Args:
-            query: The user's message text to search against.
-
-        Returns:
-            Formatted memories markdown string, or empty string.
-        """
-        if not self.memory_config or not self.memory_config.enabled:
-            return ""
-
-        if not self.memory_config.retrieval_url:
-            return ""
-
-        # Skip trivial messages
-        stripped = query.strip()
-        if len(stripped) < 5:
-            logger.debug(f"Memory retrieval skipped: query too short ({len(stripped)} chars)")
-            return ""
-
-        logger.info(f"Memory retrieval: querying with '{stripped[:60]}...'")
-
-        try:
-            import httpx
-
-            headers = {"Content-Type": "application/json"}
-            if self.memory_config.retrieval_auth:
-                headers["Authorization"] = self.memory_config.retrieval_auth
-
-            payload = {
-                "query": stripped,
-                "nanobot_token": self.memory_config.nanobot_token,
-                "top_k": self.memory_config.top_k,
-            }
-
-            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-                resp = await client.post(
-                    self.memory_config.retrieval_url,
-                    json=payload,
-                    headers=headers,
-                )
-
-            if resp.status_code != 200:
-                logger.warning(f"Memory retrieval returned {resp.status_code}: {resp.text[:200]}")
-                return ""
-
-            data = resp.json()
-            # Frappe wraps responses in {"message": ...}
-            if "message" in data:
-                data = data["message"]
-
-            memories = data.get("memories", "")
-            count = data.get("count", 0)
-            if memories and count > 0:
-                logger.info(f"Memory retrieval: injecting {count} memories into context")
-            else:
-                logger.info("Memory retrieval: no relevant memories found")
-            return memories
-
-        except Exception as e:
-            logger.warning(f"Memory retrieval failed: {e}")
-            return ""
 
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """

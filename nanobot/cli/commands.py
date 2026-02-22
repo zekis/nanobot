@@ -176,6 +176,7 @@ def gateway(
 ):
     """Start the nanobot gateway."""
     from nanobot.config.loader import load_config, get_data_dir
+    from nanobot.bus.events import OutboundMessage
     from nanobot.bus.queue import MessageBus
     from nanobot.agent.loop import AgentLoop
     from nanobot.channels.manager import ChannelManager
@@ -220,11 +221,11 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         webhook_emitter=webhook_emitter,
-        memory_config=config.memory if config.memory.enabled else None,
+        skillgate_config=config.skillgate,
         debug_config=config.debug,
     )
     if config.memory.enabled:
-        console.print(f"[green]✓[/green] Memory retrieval: {config.memory.retrieval_url}")
+        console.print(f"[green]✓[/green] Memory: file-based (MEMORY.md + daily notes)")
     
     # Cron callback disabled (cron service is off)
     
@@ -253,73 +254,28 @@ def gateway(
     
     console.print(f"[green]✓[/green] Heartbeat: every 30m")
     
-    def _get_gateway_creds():
-        """Read skill_gateway.json for Frappe API credentials."""
-        import json as _json
-        gw_path = config.workspace_path / "skill_gateway.json"
-        if not gw_path.exists():
-            return None
-        try:
-            data = _json.loads(gw_path.read_text(encoding="utf-8"))
-            url = data.get("url", "")
-            api_key = data.get("api_key", "")
-            api_secret = data.get("api_secret", "")
-            nanobot_token = data.get("nanobot_token", "")
-            if all([url, api_key, api_secret, nanobot_token]):
-                return {
-                    "url": url.rstrip("/"),
-                    "api_key": api_key,
-                    "api_secret": api_secret,
-                    "nanobot_token": nanobot_token,
-                }
-        except Exception:
-            pass
-        return None
-
-    async def _deliver_to_messaging(response, notice_type="message"):
-        """Deliver a notice response to the Frappe messaging app via API."""
-        import aiohttp
-        creds = _get_gateway_creds()
-        if not creds or not response:
+    async def _deliver_to_raven(response, chat_id="owner"):
+        """Deliver a notice response to Raven via the message bus."""
+        if not response or not config.channels.raven.enabled:
             return False
         try:
-            url = f"{creds['url']}/api/method/nanonet.api.messaging.deliver_bot_message"
-            auth_header = f"token {creds['api_key']}:{creds['api_secret']}"
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url,
-                    json={
-                        "nanobot_token": creds["nanobot_token"],
-                        "content": response,
-                        "notice_type": notice_type,
-                    },
-                    headers={"Authorization": auth_header},
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as resp:
-                    if resp.status == 200:
-                        console.print(f"[green]✓[/green] {notice_type} delivered to messaging app")
-                        return True
-                    else:
-                        body = await resp.text()
-                        console.print(f"[yellow]Warning: Messaging delivery returned {resp.status}: {body[:200]}[/yellow]")
-                        return False
+            await bus.publish_outbound(OutboundMessage(
+                channel="raven",
+                chat_id=chat_id,
+                content=response,
+            ))
+            console.print(f"[green]✓[/green] Message delivered to Raven")
+            return True
         except Exception as e:
-            console.print(f"[yellow]Warning: Failed to deliver to messaging: {e}[/yellow]")
+            console.print(f"[yellow]Warning: Failed to deliver to Raven: {e}[/yellow]")
             return False
-
-    def _read_owner_dm_channel() -> str:
-        """Read the owner DM channel ID written by Frappe during deploy."""
-        dm_path = config.workspace_path / "OWNER_DM_CHANNEL"
-        if dm_path.exists():
-            return dm_path.read_text(encoding="utf-8").strip()
-        return ""
 
     async def check_redeployment_notice():
         """Check for REDEPLOYMENT_NOTICE.md on startup and prompt the agent."""
         notice_path = config.workspace_path / "REDEPLOYMENT_NOTICE.md"
         if not notice_path.exists():
             return
-        # Wait for the API channel to be ready
+        # Wait for channels to be ready
         await asyncio.sleep(10)
         try:
             notice = notice_path.read_text(encoding="utf-8").strip()
@@ -329,22 +285,19 @@ def gateway(
 
             console.print("[green]✓[/green] Redeployment notice found, prompting agent...")
 
-            # Use Raven-compatible session key so webhook events route correctly
-            owner_dm = _read_owner_dm_channel()
-            session_key = f"raven:{owner_dm}" if owner_dm else "messaging:redeployment"
+            owner_dm = config.channels.raven.owner_dm_channel
+            session_key = f"raven:{owner_dm}" if owner_dm else "system:redeployment"
 
             response = await agent.process_direct(
                 notice,
                 session_key=session_key,
-                channel="raven" if owner_dm else "messaging",
+                channel="raven" if owner_dm else "system",
                 chat_id=owner_dm or "redeployment",
             )
 
-            # Deliver response to Raven via Frappe API
             if response:
-                await _deliver_to_messaging(response, notice_type="redeployment")
+                await _deliver_to_raven(response, chat_id=owner_dm or "owner")
 
-            # Remove after processing so it doesn't re-trigger on normal restarts
             notice_path.unlink(missing_ok=True)
         except Exception as e:
             console.print(f"[yellow]Warning: Failed to process redeployment notice: {e}[/yellow]")
@@ -354,7 +307,7 @@ def gateway(
         notice_path = config.workspace_path / "STARTUP_NOTICE.md"
         if not notice_path.exists():
             return
-        # Wait for the API channel to be ready
+        # Wait for channels to be ready
         await asyncio.sleep(10)
         try:
             notice = notice_path.read_text(encoding="utf-8").strip()
@@ -364,22 +317,19 @@ def gateway(
 
             console.print("[green]✓[/green] Startup notice found, sending greeting...")
 
-            # Use Raven-compatible session key so webhook events route correctly
-            owner_dm = _read_owner_dm_channel()
-            session_key = f"raven:{owner_dm}" if owner_dm else "messaging:startup"
+            owner_dm = config.channels.raven.owner_dm_channel
+            session_key = f"raven:{owner_dm}" if owner_dm else "system:startup"
 
             response = await agent.process_direct(
                 notice,
                 session_key=session_key,
-                channel="raven" if owner_dm else "messaging",
+                channel="raven" if owner_dm else "system",
                 chat_id=owner_dm or "startup",
             )
 
-            # Deliver response to Raven via Frappe API
             if response:
-                await _deliver_to_messaging(response, notice_type="startup")
+                await _deliver_to_raven(response, chat_id=owner_dm or "owner")
 
-            # Remove after processing so it doesn't re-trigger on normal restarts
             notice_path.unlink(missing_ok=True)
         except Exception as e:
             console.print(f"[yellow]Warning: Failed to process startup notice: {e}[/yellow]")

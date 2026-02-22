@@ -39,12 +39,23 @@ class DiscordConfig(BaseModel):
     intents: int = 37377  # GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
 
 
+class RavenConfig(BaseModel):
+    """Raven messaging channel configuration (direct API)."""
+    enabled: bool = False
+    site_url: str = ""           # e.g. "https://mysite.frappe.cloud"
+    api_key: str = ""            # Nanobot user's Frappe API key
+    api_secret: str = ""         # Nanobot user's Frappe API secret
+    bot_email: str = ""          # e.g. "Burk@nanobot.local"
+    owner_dm_channel: str = ""   # Raven Channel ID for owner DM
+
+
 class ChannelsConfig(BaseModel):
     """Configuration for chat channels."""
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    raven: RavenConfig = Field(default_factory=RavenConfig)
 
 
 class AgentDefaults(BaseModel):
@@ -120,12 +131,18 @@ class HooksConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    """Memory retrieval configuration for automatic context injection."""
-    enabled: bool = False  # Master switch for auto-retrieval
-    retrieval_url: str = ""  # URL to POST retrieval queries to (e.g. Frappe memory.retrieve endpoint)
-    retrieval_auth: str = ""  # Authorization header value (e.g. "token api_key:api_secret")
-    nanobot_token: str = ""  # Nanobot identity token
-    top_k: int = 5  # Number of memories to retrieve per query
+    """Memory configuration (file-based on mounted volume)."""
+    enabled: bool = True  # Default ON — file-based memory is free
+
+
+class SkillgateConfig(BaseModel):
+    """Skillgate tool gateway configuration (direct API)."""
+    enabled: bool = False
+    url: str = ""                # Frappe site URL
+    api_key: str = ""
+    api_secret: str = ""
+    client_name: str = ""        # Skill Gateway Client name
+    tools: list[dict] = Field(default_factory=list)  # Tool definitions [{name, description, input_schema}]
 
 
 class DebugConfig(BaseModel):
@@ -144,6 +161,7 @@ class Config(BaseSettings):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    skillgate: SkillgateConfig = Field(default_factory=SkillgateConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
     
     @property
